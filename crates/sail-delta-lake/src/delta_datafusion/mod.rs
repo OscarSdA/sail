@@ -58,14 +58,15 @@ use datafusion::sql::sqlparser::parser::Parser;
 use datafusion::sql::sqlparser::tokenizer::Tokenizer;
 use deltalake::errors::{DeltaResult, DeltaTableError};
 use deltalake::kernel::{Add, EagerSnapshot, Snapshot};
-use deltalake::logstore::LogStoreRef;
-use deltalake::table::state::DeltaTableState;
+use deltalake::logstore::{LogStore, LogStoreRef};
 use object_store::ObjectMeta;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::delta_datafusion::schema_adapter::DeltaSchemaAdapterFactory;
-use crate::kernel::log_data::SailLogDataHandler;
+use crate::kernel::snapshot::log_data::SailLogDataHandler;
+use crate::table::DeltaTableState;
+
 /// [Credit]: <https://github.com/delta-io/delta-rs/blob/3607c314cbdd2ad06c6ee0677b92a29f695c71f3/crates/core/src/delta_datafusion/mod.rs>
 pub(crate) const PATH_COLUMN: &str = "__delta_rs_path";
 
@@ -134,13 +135,13 @@ impl DataFusionMixins for EagerSnapshot {
     }
 }
 
-impl DataFusionMixins for DeltaTableState {
+impl DataFusionMixins for crate::kernel::snapshot::EagerSnapshot {
     fn arrow_schema(&self) -> DeltaResult<ArrowSchemaRef> {
-        self.snapshot().arrow_schema()
+        arrow_schema_from_struct_type(self.schema(), self.metadata().partition_columns(), true)
     }
 
     fn input_schema(&self) -> DeltaResult<ArrowSchemaRef> {
-        self.snapshot().input_schema()
+        arrow_schema_from_struct_type(self.schema(), self.metadata().partition_columns(), false)
     }
 }
 
@@ -369,6 +370,43 @@ pub(crate) fn df_logical_schema(
     Ok(Arc::new(ArrowSchema::new(fields)))
 }
 
+/// The logical schema for a Deltatable using sail's EagerSnapshot
+pub(crate) fn df_logical_schema_sail(
+    snapshot: &crate::kernel::snapshot::EagerSnapshot,
+    file_column_name: &Option<String>,
+    schema: Option<ArrowSchemaRef>,
+) -> DeltaResult<SchemaRef> {
+    let input_schema = match schema {
+        Some(schema) => schema,
+        None => snapshot.input_schema()?,
+    };
+    let table_partition_cols = snapshot.metadata().partition_columns();
+
+    let mut fields: Vec<Arc<Field>> = input_schema
+        .fields()
+        .iter()
+        .filter(|f| !table_partition_cols.contains(f.name()))
+        .cloned()
+        .collect();
+
+    // Add partition columns at the end
+    for partition_col in table_partition_cols {
+        if let Some(field) = input_schema.field_with_name(partition_col).ok() {
+            fields.push(field.clone().into());
+        }
+    }
+
+    if let Some(file_column_name) = file_column_name {
+        fields.push(Arc::new(Field::new(
+            file_column_name,
+            ArrowDataType::Utf8,
+            true,
+        )));
+    }
+
+    Ok(Arc::new(ArrowSchema::new(fields)))
+}
+
 #[derive(Debug, Clone)]
 /// Used to specify if additional metadata columns are exposed to the user
 pub struct DeltaScanConfigBuilder {
@@ -476,6 +514,24 @@ impl DeltaScanConfigBuilder {
                     Some(name)
                 }
             }
+        } else {
+            None
+        };
+
+        Ok(DeltaScanConfig {
+            file_column_name,
+            wrap_partition_values: self.wrap_partition_values.unwrap_or(true),
+            enable_parquet_pushdown: self.enable_parquet_pushdown,
+            schema: self.schema.clone(),
+        })
+    }
+
+    /// Build a default DeltaScanConfig without requiring a snapshot
+    pub fn build_default(&self) -> DeltaResult<DeltaScanConfig> {
+        let file_column_name = if self.include_file_column {
+            self.file_column_name
+                .clone()
+                .or_else(|| Some(PATH_COLUMN.to_owned()))
         } else {
             None
         };
@@ -595,7 +651,7 @@ impl ExecutionPlan for DeltaScan {
 }
 
 pub(crate) struct DeltaScanBuilder<'a> {
-    snapshot: &'a DeltaTableState,
+    snapshot: &'a crate::kernel::snapshot::EagerSnapshot,
     log_store: LogStoreRef,
     filter: Option<Expr>,
     session: &'a dyn Session,
@@ -607,7 +663,7 @@ pub(crate) struct DeltaScanBuilder<'a> {
 
 impl<'a> DeltaScanBuilder<'a> {
     pub fn new(
-        snapshot: &'a DeltaTableState,
+        snapshot: &'a crate::kernel::snapshot::EagerSnapshot,
         log_store: LogStoreRef,
         session: &'a dyn Session,
     ) -> Self {
@@ -651,15 +707,18 @@ impl<'a> DeltaScanBuilder<'a> {
     pub async fn build(self) -> DeltaResult<DeltaScan> {
         let config = match self.config {
             Some(config) => config,
-            None => DeltaScanConfigBuilder::new().build(self.snapshot)?,
+            None => {
+                // For now, use default config since we can't easily create DeltaTableState from sail's EagerSnapshot
+                DeltaScanConfigBuilder::new().build_default()?
+            }
         };
 
         let schema = match config.schema.clone() {
             Some(value) => Ok(value),
-            None => self.snapshot.arrow_schema(),
+            None => DataFusionMixins::arrow_schema(self.snapshot),
         }?;
 
-        let logical_schema = df_logical_schema(
+        let logical_schema = df_logical_schema_sail(
             self.snapshot,
             &config.file_column_name,
             Some(schema.clone()),
@@ -756,7 +815,7 @@ impl<'a> DeltaScanBuilder<'a> {
             None => {
                 // early return in case we have no push down filters or limit
                 if logical_filter.is_none() && self.limit.is_none() {
-                    let files: Vec<Add> = self.snapshot.file_actions_iter()?.collect();
+                    let files: Vec<Add> = self.snapshot.file_actions_iter()?;
                     let files_scanned = files.len();
                     (files, files_scanned, 0, None)
                 } else {
@@ -781,6 +840,7 @@ impl<'a> DeltaScanBuilder<'a> {
                     for (action, keep) in self
                         .snapshot
                         .file_actions_iter()?
+                        .into_iter()
                         .zip(files_to_prune.iter().cloned())
                     {
                         // prune file based on predicate pushdown
@@ -1127,7 +1187,7 @@ pub(crate) fn to_correct_scalar_value(
 /// A Delta table provider that enables additional metadata columns to be included during the scan
 #[derive(Debug)]
 pub struct DeltaTableProvider {
-    snapshot: DeltaTableState,
+    snapshot: crate::kernel::snapshot::EagerSnapshot,
     log_store: LogStoreRef,
     config: DeltaScanConfig,
     schema: Arc<ArrowSchema>,
@@ -1137,12 +1197,16 @@ pub struct DeltaTableProvider {
 impl DeltaTableProvider {
     /// Build a DeltaTableProvider
     pub fn try_new(
-        snapshot: DeltaTableState,
+        snapshot: crate::kernel::snapshot::EagerSnapshot,
         log_store: LogStoreRef,
         config: DeltaScanConfig,
     ) -> DeltaResult<Self> {
         Ok(DeltaTableProvider {
-            schema: df_logical_schema(&snapshot, &config.file_column_name, config.schema.clone())?,
+            schema: df_logical_schema_sail(
+                &snapshot,
+                &config.file_column_name,
+                config.schema.clone(),
+            )?,
             snapshot,
             log_store,
             config,
@@ -1212,7 +1276,7 @@ impl TableProvider for DeltaTableProvider {
     }
 
     fn statistics(&self) -> Option<Statistics> {
-        self.snapshot.datafusion_table_statistics(Option::None)
+        self.snapshot.log_data().statistics(None)
     }
 }
 
@@ -1423,6 +1487,7 @@ pub(crate) async fn find_files_scan(
 ) -> DeltaResult<Vec<Add>> {
     let candidate_map: HashMap<String, Add> = snapshot
         .file_actions_iter()?
+        .into_iter()
         .map(|add| (add.path.clone(), add.to_owned()))
         .collect();
 
@@ -1442,7 +1507,15 @@ pub(crate) async fn find_files_scan(
     #[allow(clippy::unwrap_used)]
     used_columns.push(logical_schema.index_of(scan_config.file_column_name.as_ref().unwrap())?);
 
-    let scan = DeltaScanBuilder::new(snapshot, log_store, state)
+    // Convert DeltaTableState to sail's EagerSnapshot
+    let sail_snapshot = crate::kernel::snapshot::EagerSnapshot::try_new(
+        log_store.as_ref(),
+        snapshot.load_config().clone(),
+        Some(snapshot.version()),
+    )
+    .await?;
+
+    let scan = DeltaScanBuilder::new(&sail_snapshot, log_store, state)
         .with_filter(Some(expression.clone()))
         .with_projection(Some(&used_columns))
         .with_scan_config(scan_config)

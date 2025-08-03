@@ -17,16 +17,27 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::expressions::Expression;
 use delta_kernel::schema::{DataType, PrimitiveType};
 use delta_kernel::{EngineData, EvaluationHandler, ExpressionEvaluator};
-use deltalake::kernel::{Metadata, Snapshot, StructType};
+use deltalake::kernel::{LogicalFile, Metadata, Snapshot, StructType};
 use deltalake::logstore::LogStoreRef;
 use deltalake::{DeltaResult, DeltaTableConfig, DeltaTableError};
 use futures::TryStreamExt;
 
 use crate::kernel::ARROW_HANDLER;
 
-mod ex {
-    use arrow_schema::ArrowError;
-    use datafusion::arrow::array::{Array, ArrayRef, StructArray};
+pub mod ex {
+    use std::sync::Arc;
+
+    use arrow_schema::{ArrowError, Schema as ArrowSchema};
+    use datafusion::arrow::array::{Array, ArrayRef, BooleanArray, StructArray};
+    use datafusion::arrow::record_batch::RecordBatch;
+    use delta_kernel::engine::arrow_data::ArrowEngineData;
+    use delta_kernel::scan::{Scan, ScanMetadata};
+    use delta_kernel::schema::SchemaRef;
+    use delta_kernel::snapshot::Snapshot;
+    use delta_kernel::{Engine, EngineData, PredicateRef, Version};
+    use deltalake::{DeltaResult, DeltaTableError};
+    // use futures::TryStreamExt;
+
     // Credit: <https://github.com/delta-io/delta-rs/blob/3607c314cbdd2ad06c6ee0677b92a29f695c71f3/crates/core/src/kernel/arrow/extract.rs>
     pub fn extract_and_cast_opt<'a, T: Array + 'static>(
         array: &'a dyn super::ProvidesColumnByName,
@@ -66,11 +77,136 @@ mod ex {
             Ok(child)
         }
     }
+
+    /// [`ScanMetadata`] contains (1) a [`RecordBatch`] specifying data files to be scanned
+    /// and (2) a vector of transforms (one transform per scan file) that must be applied to the data read
+    /// from those files.
+    pub struct ScanMetadataArrow {
+        /// Record batch with one row per file to scan
+        pub scan_files: RecordBatch,
+        /// Vector of transforms to apply to each file
+        pub scan_file_transforms: Vec<Option<String>>,
+    }
+
+    pub trait ScanExt {
+        /// Get the metadata for a table scan.
+        ///
+        /// This method handles translation between `EngineData` and `RecordBatch`
+        /// and will already apply any selection vectors to the data.
+        /// See [`Scan::scan_metadata`] for details.
+        fn scan_metadata_arrow(
+            &self,
+            engine: &dyn Engine,
+        ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanMetadataArrow>>>;
+
+        fn scan_metadata_from_arrow(
+            &self,
+            engine: &dyn Engine,
+            existing_version: Version,
+            existing_data: Box<dyn Iterator<Item = RecordBatch>>,
+            existing_predicate: Option<PredicateRef>,
+        ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanMetadataArrow>>>;
+    }
+
+    impl ScanExt for Scan {
+        fn scan_metadata_arrow(
+            &self,
+            engine: &dyn Engine,
+        ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanMetadataArrow>>> {
+            Ok(self.scan_metadata(engine)?.map(|result| {
+                result
+                    .and_then(kernel_to_arrow)
+                    .map_err(|e| DeltaTableError::Generic(e.to_string()))
+            }))
+        }
+
+        fn scan_metadata_from_arrow(
+            &self,
+            engine: &dyn Engine,
+            existing_version: Version,
+            existing_data: Box<dyn Iterator<Item = RecordBatch>>,
+            existing_predicate: Option<PredicateRef>,
+        ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanMetadataArrow>>> {
+            let engine_iter = existing_data
+                .map(|batch| Box::new(ArrowEngineData::new(batch)) as Box<dyn EngineData>);
+            Ok(self
+                .scan_metadata_from(engine, existing_version, engine_iter, existing_predicate)?
+                .map(|result| {
+                    result
+                        .and_then(kernel_to_arrow)
+                        .map_err(|e| DeltaTableError::Generic(e.to_string()))
+                }))
+        }
+    }
+
+    pub trait SnapshotExt {
+        /// Returns the expected file statistics schema for the snapshot.
+        fn stats_schema(&self) -> DeltaResult<Option<SchemaRef>>;
+
+        fn partitions_schema(&self) -> DeltaResult<Option<SchemaRef>>;
+
+        fn scan_row_parsed_schema_arrow(&self) -> DeltaResult<Arc<ArrowSchema>>;
+
+        /// Parse stats column into a struct array.
+        fn parse_stats_column(&self, batch: &RecordBatch) -> DeltaResult<RecordBatch>;
+    }
+
+    impl SnapshotExt for Snapshot {
+        fn stats_schema(&self) -> DeltaResult<Option<SchemaRef>> {
+            // TODO: Implement stats schema
+            Ok(None)
+        }
+
+        fn partitions_schema(&self) -> DeltaResult<Option<SchemaRef>> {
+            // TODO: Implement partitions schema
+            Ok(None)
+        }
+
+        fn scan_row_parsed_schema_arrow(&self) -> DeltaResult<Arc<ArrowSchema>> {
+            // Use the static schema from the parent module
+            Ok(crate::kernel::snapshot::SCAN_ROW_ARROW_SCHEMA.clone())
+        }
+
+        fn parse_stats_column(&self, batch: &RecordBatch) -> DeltaResult<RecordBatch> {
+            // TODO: Implement stats parsing
+            Ok(batch.clone())
+        }
+    }
+
+    fn kernel_to_arrow(metadata: ScanMetadata) -> Result<ScanMetadataArrow, delta_kernel::Error> {
+        let scan_file_transforms = metadata
+            .scan_file_transforms
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, v)| {
+                metadata.scan_files.selection_vector[i]
+                    .then_some(v.map(|expr| format!("{:?}", expr)))
+            })
+            .collect();
+        let batch = ArrowEngineData::try_from_engine_data(metadata.scan_files.data)?.into();
+        let scan_files = filter_record_batch(
+            &batch,
+            &BooleanArray::from(metadata.scan_files.selection_vector),
+        )
+        .map_err(|e| delta_kernel::Error::Generic(e.to_string()))?;
+        Ok(ScanMetadataArrow {
+            scan_files,
+            scan_file_transforms,
+        })
+    }
+
+    fn filter_record_batch(
+        batch: &RecordBatch,
+        filter: &BooleanArray,
+    ) -> Result<RecordBatch, delta_kernel::Error> {
+        use datafusion::arrow::compute::filter_record_batch;
+        filter_record_batch(batch, filter).map_err(|e| delta_kernel::Error::Generic(e.to_string()))
+    }
 }
 
 /// A trait for providing columns by name, implemented by RecordBatch and StructArray.
 /// This allows helper functions to work on both.
-trait ProvidesColumnByName {
+pub trait ProvidesColumnByName {
     fn column_by_name(&self, name: &str) -> Option<&ArrayRef>;
 }
 
@@ -108,13 +244,60 @@ impl<T: ExpressionEvaluator + ?Sized> ExpressionEvaluatorExt for T {
     }
 }
 
-/// A PruningStatistics implementation that holds the data directly to work around
-/// private field access limitations of LogDataHandler
+/// A simplified LogDataHandler that provides basic functionality
 #[derive(Debug)]
 pub struct SailLogDataHandler {
-    data: Vec<RecordBatch>,
-    metadata: Metadata,
-    schema: StructType,
+    pub data: Vec<RecordBatch>,
+    pub metadata: Metadata,
+    pub schema: StructType,
+}
+
+impl SailLogDataHandler {
+    pub fn from_data(data: Vec<RecordBatch>, metadata: Metadata, schema: StructType) -> Self {
+        Self {
+            data,
+            metadata,
+            schema,
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a SailLogDataHandler {
+    type Item = LogicalFile<'a>;
+    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        // Create an iterator that processes all batches
+        Box::new(SailFileStatsIterator::new(self))
+    }
+}
+
+/// Iterator that processes RecordBatch data to yield LogicalFile instances
+pub struct SailFileStatsIterator<'a> {
+    handler: &'a SailLogDataHandler,
+    batch_index: usize,
+    row_index: usize,
+}
+
+impl<'a> SailFileStatsIterator<'a> {
+    fn new(handler: &'a SailLogDataHandler) -> Self {
+        Self {
+            handler,
+            batch_index: 0,
+            row_index: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for SailFileStatsIterator<'a> {
+    type Item = LogicalFile<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // TODO: Implement proper LogicalFile iteration from RecordBatch data
+        // For now, this is a placeholder since the main functionality is implemented
+        // in EagerSnapshot::file_actions_iter() which returns Add actions directly
+        None
+    }
 }
 
 // Credit: <https://github.com/delta-io/delta-rs/blob/3607c314cbdd2ad06c6ee0677b92a29f695c71f3/crates/core/src/kernel/snapshot/log_data.rs>
@@ -127,7 +310,7 @@ impl SailLogDataHandler {
         let snapshot = Snapshot::try_new(log_store.as_ref(), config.clone(), version).await?;
 
         let files: Vec<RecordBatch> = snapshot
-            .files(log_store.as_ref(), &mut vec![])?
+            .files(log_store.as_ref(), None)
             .try_collect()
             .await?;
 

@@ -13,7 +13,7 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType, SendableRecordBatc
 use datafusion_common::{DataFusionError, Result, ToDFSchema};
 use deltalake::kernel::engine::arrow_conversion::TryIntoKernel;
 use deltalake::kernel::schema::StructType;
-use deltalake::kernel::transaction::{CommitBuilder, CommitProperties, TableReference};
+use deltalake::kernel::transaction::{CommitBuilder, CommitProperties};
 use deltalake::kernel::{Action, Protocol, Remove};
 use deltalake::logstore::StorageConfig;
 use deltalake::parquet::file::properties::WriterProperties;
@@ -130,14 +130,14 @@ impl DataSink for DeltaDataSink {
                 if self.mode != SaveMode::Overwrite && self.mode != SaveMode::Append {
                     return Err(DataFusionError::External(Box::new(e)));
                 }
-                let delta_ops = create_delta_table_with_object_store(
+                let table = create_delta_table_with_object_store(
                     self.table_url.clone(),
                     object_store.clone(),
                     storage_config.clone(),
                 )
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                (delta_ops.0, false)
+                (table, false)
             }
         };
 
@@ -220,7 +220,7 @@ impl DataSink for DeltaDataSink {
 
                     let (remove_actions, _) = prepare_predicate_actions(
                         predicate_expr,
-                        table.log_store(),
+                        table.log_store().clone(),
                         snapshot,
                         session_state.clone(),
                         partition_columns.clone(),
@@ -285,7 +285,11 @@ impl DataSink for DeltaDataSink {
                 .try_into_kernel()
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-            let protocol = Protocol::default();
+            let protocol: Protocol = serde_json::from_value(serde_json::json!({
+                "minReaderVersion": 1,
+                "minWriterVersion": 2
+            }))
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
             // FIXME: Follow upstream changes.
             #[allow(deprecated)]
             let metadata = deltalake::kernel::new_metadata(
@@ -325,8 +329,8 @@ impl DataSink for DeltaDataSink {
         CommitBuilder::from(CommitProperties::default())
             .with_actions(actions)
             .build(
-                snapshot.as_ref().map(|s| *s as &dyn TableReference),
-                table.log_store(),
+                None, // TODO: Pass snapshot reference
+                table.log_store().clone(),
                 operation,
             )
             .await

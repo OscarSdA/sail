@@ -1196,9 +1196,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.30"
+version = "1.2.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "deec109607ca693028562ed836a5f1c4b8bd77755c4e132fc5ce11b0b6211ae7"
+checksum = "c3a42d84bb6b69d3a8b3eaacf0d88f179e1929695e1ad012b6cf64d9caaa5fd2"
 dependencies = [
  "jobserver",
  "libc",
@@ -2305,8 +2305,7 @@ dependencies = [
 [[package]]
 name = "delta_kernel"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f06f3676832e713e44f65804cebf82f46962d3e126f64f3251eb5fbeb0ad94e4"
+source = "git+https://github.com/delta-io/delta-kernel-rs?rev=a15c01155c67017252a1b52b7b63ea9078caae87#a15c01155c67017252a1b52b7b63ea9078caae87"
 dependencies = [
  "arrow",
  "bytes",
@@ -2334,8 +2333,7 @@ dependencies = [
 [[package]]
 name = "delta_kernel_derive"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "059e70a67ae0c827a0e7f393eb05db2985533b3b612f8b33243433853570db45"
+source = "git+https://github.com/delta-io/delta-kernel-rs?rev=a15c01155c67017252a1b52b7b63ea9078caae87#a15c01155c67017252a1b52b7b63ea9078caae87"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2345,7 +2343,7 @@ dependencies = [
 [[package]]
 name = "deltalake"
 version = "0.28.0"
-source = "git+https://github.com/delta-io/delta-rs.git?rev=9a2c8ea#9a2c8eab19f5a121b807461168ff3cad5fec6707"
+source = "git+https://github.com/delta-io/delta-rs.git?rev=db97266#db9726635a3b5b5703580427e21bfc65aa74edcb"
 dependencies = [
  "delta_kernel",
  "deltalake-core",
@@ -2354,7 +2352,7 @@ dependencies = [
 [[package]]
 name = "deltalake-core"
 version = "0.28.0"
-source = "git+https://github.com/delta-io/delta-rs.git?rev=9a2c8ea#9a2c8eab19f5a121b807461168ff3cad5fec6707"
+source = "git+https://github.com/delta-io/delta-rs.git?rev=db97266#db9726635a3b5b5703580427e21bfc65aa74edcb"
 dependencies = [
  "arrow",
  "arrow-arith",
@@ -2406,7 +2404,7 @@ dependencies = [
 [[package]]
 name = "deltalake-derive"
 version = "0.28.0"
-source = "git+https://github.com/delta-io/delta-rs.git?rev=9a2c8ea#9a2c8eab19f5a121b807461168ff3cad5fec6707"
+source = "git+https://github.com/delta-io/delta-rs.git?rev=db97266#db9726635a3b5b5703580427e21bfc65aa74edcb"
 dependencies = [
  "convert_case",
  "itertools 0.14.0",
@@ -3858,7 +3856,6 @@ checksum = "391290121bad3d37fbddad76d8f5d1c1c314cfc646d143d7e07a3086ddff0ce3"
 dependencies = [
  "bitflags",
  "libc",
- "redox_syscall",
 ]
 
 [[package]]
@@ -3938,9 +3935,9 @@ checksum = "3e2e65a1a2e43cfcb47a895c4c8b10d1f4a61097f9f254f183aee60cad9c651d"
 
 [[package]]
 name = "marrow"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3641f6a55539a8b6e5349b3bdfb5b315714fbceda3253815838f49e40e3ea757"
+checksum = "64369333feea08a4c974cc5d7bad82197999624d0c9508bec4b97ea9fc0e3f63"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -5127,9 +5124,9 @@ dependencies = [
 
 [[package]]
 name = "redox_users"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78eaea1f52c56d57821be178b2d47e09ff26481a6042e8e042fcb0ced068b470"
+checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
 dependencies = [
  "getrandom 0.2.16",
  "libredox",
@@ -5919,9 +5916,9 @@ dependencies = [
 
 [[package]]
 name = "serde_arrow"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "221bea57dc6cb0aec429ab73af67b4a46cfdef464082e391cd609f7c5b50be4f"
+checksum = "55af245b3a27a1fed12634542d4e193b98b40aa69a7956c23cd9f8902c408463"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -5954,9 +5951,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.141"
+version = "1.0.142"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30b9eff21ebe718216c6ec64e1d9ac57087aad11efc64e32002bce4a0d4c03d3"
+checksum = "030fedb782600dcbd6f02d479bf0d817ac3bb40d644745b769d6a96bc3afc5a7"
 dependencies = [
  "itoa",
  "memchr",
@@ -6394,9 +6391,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.47.0"
+version = "1.47.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43864ed400b6043a4757a25c7a64a8efde741aed79a056a2fb348a406701bb35"
+checksum = "89e49afdadebb872d3145a5638b59eb0691ea23e46ca484037cfab3b76b95038"
 dependencies = [
  "backtrace",
  "bytes",

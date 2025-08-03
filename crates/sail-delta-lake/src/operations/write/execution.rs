@@ -9,7 +9,6 @@ use deltalake::errors::DeltaResult;
 use deltalake::kernel::{Action, Add, Remove};
 use deltalake::logstore::LogStoreRef;
 use deltalake::parquet::file::properties::WriterProperties;
-use deltalake::table::state::DeltaTableState;
 use deltalake::Path;
 use uuid::Uuid;
 
@@ -18,6 +17,7 @@ use crate::delta_datafusion::{
     DeltaTableProvider,
 };
 use crate::operations::write::writer::{DeltaWriter, WriterConfig};
+use crate::table::DeltaTableState;
 
 /// Configuration for the writer on how to collect stats
 #[derive(Clone)]
@@ -61,8 +61,16 @@ pub(crate) async fn execute_non_empty_expr(
         .with_schema(snapshot.input_schema()?)
         .build(snapshot)?;
 
+    // Convert DeltaTableState to sail's EagerSnapshot
+    let sail_snapshot = crate::kernel::snapshot::EagerSnapshot::try_new(
+        log_store.as_ref(),
+        snapshot.load_config().clone(),
+        Some(snapshot.version()),
+    )
+    .await?;
+
     let target_provider = Arc::new(
-        DeltaTableProvider::try_new(snapshot.clone(), log_store.clone(), scan_config.clone())?
+        DeltaTableProvider::try_new(sail_snapshot, log_store.clone(), scan_config.clone())?
             .with_files(rewrite.to_vec()),
     );
 
@@ -93,7 +101,7 @@ pub(crate) async fn execute_non_empty_expr(
             partition_columns.clone(),
             log_store.object_store(Some(operation_id)),
             Path::from(""),
-            Some(snapshot.table_config().target_file_size() as usize),
+            Some(32 * 1024 * 1024), // Default 32MB target file size
             None,
             writer_properties.clone(),
             writer_stats_config.clone(),
