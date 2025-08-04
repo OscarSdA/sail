@@ -17,7 +17,7 @@ use crate::delta_datafusion::{
     DeltaTableProvider,
 };
 use crate::operations::write::writer::{DeltaWriter, WriterConfig};
-use crate::table::DeltaTableState;
+use crate::table::state::DeltaTableState;
 
 /// Configuration for the writer on how to collect stats
 #[derive(Clone)]
@@ -61,17 +61,13 @@ pub(crate) async fn execute_non_empty_expr(
         .with_schema(snapshot.input_schema()?)
         .build(snapshot)?;
 
-    // Convert DeltaTableState to sail's EagerSnapshot
-    let sail_snapshot = crate::kernel::snapshot::EagerSnapshot::try_new(
-        log_store.as_ref(),
-        snapshot.load_config().clone(),
-        Some(snapshot.version()),
-    )
-    .await?;
-
     let target_provider = Arc::new(
-        DeltaTableProvider::try_new(sail_snapshot, log_store.clone(), scan_config.clone())?
-            .with_files(rewrite.to_vec()),
+        DeltaTableProvider::try_new(
+            snapshot.snapshot().clone(),
+            log_store.clone(),
+            scan_config.clone(),
+        )?
+        .with_files(rewrite.to_vec()),
     );
 
     let target_provider = provider_as_source(target_provider);

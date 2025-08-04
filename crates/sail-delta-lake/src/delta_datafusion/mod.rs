@@ -57,7 +57,7 @@ use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::Parser;
 use datafusion::sql::sqlparser::tokenizer::Tokenizer;
 use deltalake::errors::{DeltaResult, DeltaTableError};
-use deltalake::kernel::{Add, EagerSnapshot, Snapshot};
+use deltalake::kernel::Add;
 use deltalake::logstore::{LogStore, LogStoreRef};
 use object_store::ObjectMeta;
 use serde::{Deserialize, Serialize};
@@ -65,11 +65,13 @@ use url::Url;
 
 use crate::delta_datafusion::schema_adapter::DeltaSchemaAdapterFactory;
 use crate::kernel::snapshot::log_data::SailLogDataHandler;
-use crate::table::DeltaTableState;
+use crate::kernel::snapshot::{EagerSnapshot, Snapshot};
+use crate::table::state::DeltaTableState;
 
 /// [Credit]: <https://github.com/delta-io/delta-rs/blob/3607c314cbdd2ad06c6ee0677b92a29f695c71f3/crates/core/src/delta_datafusion/mod.rs>
 pub(crate) const PATH_COLUMN: &str = "__delta_rs_path";
 
+mod expr;
 mod schema_adapter;
 
 /// Convert DeltaTableError to DataFusionError
@@ -113,6 +115,12 @@ pub trait DataFusionMixins {
 
     /// Get the table schema as an [`ArrowSchemaRef`]
     fn input_schema(&self) -> DeltaResult<ArrowSchemaRef>;
+
+    fn parse_predicate_expression(
+        &self,
+        expr: impl AsRef<str>,
+        df_state: &SessionState,
+    ) -> DeltaResult<Expr>;
 }
 
 impl DataFusionMixins for Snapshot {
@@ -122,6 +130,15 @@ impl DataFusionMixins for Snapshot {
 
     fn input_schema(&self) -> DeltaResult<ArrowSchemaRef> {
         arrow_schema_impl(self, false)
+    }
+    fn parse_predicate_expression(
+        &self,
+        expr: impl AsRef<str>,
+        df_state: &SessionState,
+    ) -> DeltaResult<Expr> {
+        let schema = DFSchema::try_from(self.arrow_schema()?.as_ref().to_owned())
+            .map_err(datafusion_to_delta_error)?;
+        parse_predicate_expression(&schema, expr, df_state)
     }
 }
 
@@ -133,15 +150,13 @@ impl DataFusionMixins for EagerSnapshot {
     fn input_schema(&self) -> DeltaResult<ArrowSchemaRef> {
         arrow_schema_from_struct_type(self.schema(), self.metadata().partition_columns(), false)
     }
-}
 
-impl DataFusionMixins for crate::kernel::snapshot::EagerSnapshot {
-    fn arrow_schema(&self) -> DeltaResult<ArrowSchemaRef> {
-        arrow_schema_from_struct_type(self.schema(), self.metadata().partition_columns(), true)
-    }
-
-    fn input_schema(&self) -> DeltaResult<ArrowSchemaRef> {
-        arrow_schema_from_struct_type(self.schema(), self.metadata().partition_columns(), false)
+    fn parse_predicate_expression(
+        &self,
+        expr: impl AsRef<str>,
+        df_state: &SessionState,
+    ) -> DeltaResult<Expr> {
+        self.snapshot().parse_predicate_expression(expr, df_state)
     }
 }
 
@@ -317,62 +332,11 @@ fn arrow_schema_impl(snapshot: &Snapshot, wrap_partitions: bool) -> DeltaResult<
     arrow_schema_from_snapshot(snapshot, wrap_partitions)
 }
 
-// Extension trait to add datafusion_table_statistics method to DeltaTableState
-trait DeltaTableStateExt {
-    fn datafusion_table_statistics(&self, mask: Option<Vec<bool>>) -> Option<Statistics>;
-}
-
-impl DeltaTableStateExt for DeltaTableState {
-    fn datafusion_table_statistics(&self, _mask: Option<Vec<bool>>) -> Option<Statistics> {
-        unimplemented!("datafusion_table_statistics is not implemented for DeltaTableState");
-    }
-}
-
 /// The logical schema for a Deltatable is different from the protocol level schema since partition
 /// columns must appear at the end of the schema. This is to align with how partition are handled
 /// at the physical level
 pub(crate) fn df_logical_schema(
-    snapshot: &DeltaTableState,
-    file_column_name: &Option<String>,
-    schema: Option<ArrowSchemaRef>,
-) -> DeltaResult<SchemaRef> {
-    let input_schema = match schema {
-        Some(schema) => schema,
-        None => snapshot.input_schema()?,
-    };
-    let table_partition_cols = &snapshot.metadata().partition_columns();
-
-    let mut fields: Vec<Arc<Field>> = input_schema
-        .fields()
-        .iter()
-        .filter(|f| !table_partition_cols.contains(f.name()))
-        .cloned()
-        .collect();
-
-    for partition_col in table_partition_cols.iter() {
-        #[allow(clippy::expect_used)]
-        fields.push(Arc::new(
-            input_schema
-                .field_with_name(partition_col)
-                .expect("Partition column should exist in input schema")
-                .to_owned(),
-        ));
-    }
-
-    if let Some(file_column_name) = file_column_name {
-        fields.push(Arc::new(Field::new(
-            file_column_name,
-            ArrowDataType::Utf8,
-            true,
-        )));
-    }
-
-    Ok(Arc::new(ArrowSchema::new(fields)))
-}
-
-/// The logical schema for a Deltatable using sail's EagerSnapshot
-pub(crate) fn df_logical_schema_sail(
-    snapshot: &crate::kernel::snapshot::EagerSnapshot,
+    snapshot: &EagerSnapshot,
     file_column_name: &Option<String>,
     schema: Option<ArrowSchemaRef>,
 ) -> DeltaResult<SchemaRef> {
@@ -405,6 +369,37 @@ pub(crate) fn df_logical_schema_sail(
     }
 
     Ok(Arc::new(ArrowSchema::new(fields)))
+}
+
+use itertools::Either;
+
+pub(crate) fn files_matching_predicate<'a>(
+    snapshot: &'a EagerSnapshot,
+    filters: &[Expr],
+) -> DeltaResult<impl Iterator<Item = Add> + 'a> {
+    if let Some(Some(predicate)) =
+        (!filters.is_empty()).then_some(conjunction(filters.iter().cloned()))
+    {
+        let expr = SessionContext::new()
+            .create_physical_expr(predicate, &snapshot.arrow_schema()?.to_dfschema()?)?;
+        let pruning_predicate = PruningPredicate::try_new(expr, snapshot.arrow_schema()?)?;
+        Ok(Either::Left(
+            snapshot
+                .file_actions()?
+                .zip(pruning_predicate.prune(snapshot)?)
+                .filter_map(
+                    |(action, keep_file)| {
+                        if keep_file {
+                            Some(action)
+                        } else {
+                            None
+                        }
+                    },
+                ),
+        ))
+    } else {
+        Ok(Either::Right(snapshot.file_actions()?))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -718,7 +713,7 @@ impl<'a> DeltaScanBuilder<'a> {
             None => DataFusionMixins::arrow_schema(self.snapshot),
         }?;
 
-        let logical_schema = df_logical_schema_sail(
+        let logical_schema = df_logical_schema(
             self.snapshot,
             &config.file_column_name,
             Some(schema.clone()),
@@ -1202,11 +1197,7 @@ impl DeltaTableProvider {
         config: DeltaScanConfig,
     ) -> DeltaResult<Self> {
         Ok(DeltaTableProvider {
-            schema: df_logical_schema_sail(
-                &snapshot,
-                &config.file_column_name,
-                config.schema.clone(),
-            )?,
+            schema: df_logical_schema(&snapshot, &config.file_column_name, config.schema.clone())?,
             snapshot,
             log_store,
             config,
@@ -1497,7 +1488,8 @@ pub(crate) async fn find_files_scan(
     }
     .build(snapshot)?;
 
-    let logical_schema = df_logical_schema(snapshot, &scan_config.file_column_name, None)?;
+    let logical_schema =
+        df_logical_schema(snapshot.snapshot(), &scan_config.file_column_name, None)?;
 
     let mut used_columns = expression
         .column_refs()

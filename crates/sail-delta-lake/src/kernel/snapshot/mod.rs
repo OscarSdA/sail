@@ -49,6 +49,7 @@ use url::Url;
 use crate::kernel::models::fields::ActionTypeExt;
 use crate::kernel::snapshot::log_data::SailLogDataHandler;
 use crate::kernel::snapshot::parse::read_removes;
+use crate::table::config::TableConfig;
 
 // Type aliases for compatibility
 pub type SendableRBStream = BoxStream<'static, DeltaResult<RecordBatch>>;
@@ -185,8 +186,8 @@ impl Snapshot {
     }
 
     /// Well known table configuration
-    pub fn table_config(&self) -> &std::collections::HashMap<String, String> {
-        self.inner.metadata().configuration()
+    pub fn table_config(&self) -> TableConfig<'_> {
+        TableConfig(self.inner.metadata().configuration())
     }
 
     /// Get the files in the snapshot
@@ -484,7 +485,7 @@ impl EagerSnapshot {
     }
 
     /// Well known table configuration
-    pub fn table_config(&self) -> &std::collections::HashMap<String, String> {
+    pub fn table_config(&self) -> TableConfig<'_> {
         self.snapshot.table_config()
     }
 
