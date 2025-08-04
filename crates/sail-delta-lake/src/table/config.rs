@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use deltalake::table::config::IsolationLevel;
 use deltalake::TableProperty;
 
 macro_rules! table_config {
@@ -101,4 +102,11 @@ impl TableConfig<'_> {
             100
         ),
     );
+
+    pub fn isolation_level(&self) -> IsolationLevel {
+        self.0
+            .get(TableProperty::IsolationLevel.as_ref())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_default()
+    }
 }

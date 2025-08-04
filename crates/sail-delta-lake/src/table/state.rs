@@ -84,30 +84,3 @@ impl DataFusionMixins for DeltaTableState {
         self.snapshot.parse_predicate_expression(expr, df_state)
     }
 }
-
-impl deltalake::kernel::transaction::TableReference for DeltaTableState {
-    fn metadata(&self) -> &deltalake::kernel::Metadata {
-        self.snapshot.metadata()
-    }
-
-    fn protocol(&self) -> &deltalake::kernel::Protocol {
-        self.snapshot.protocol()
-    }
-
-    fn config(&self) -> TableConfig<'_> {
-        // Since TableConfig constructor is private, we need to use unsafe transmute
-        // This is safe because TableConfig is just a wrapper around &HashMap<String, String>
-        let metadata = self.snapshot.metadata();
-        unsafe {
-            std::mem::transmute::<&std::collections::HashMap<String, String>, TableConfig<'_>>(
-                metadata.configuration(),
-            )
-        }
-    }
-
-    fn eager_snapshot(&self) -> &deltalake::kernel::EagerSnapshot {
-        // For now, we'll create a minimal delta-rs EagerSnapshot
-        // This is a temporary solution during the migration
-        todo!("Need to implement conversion from sail EagerSnapshot to delta-rs EagerSnapshot")
-    }
-}

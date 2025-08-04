@@ -26,6 +26,9 @@ use crate::kernel::snapshot::EagerSnapshot;
 // use deltalake::protocol::{cleanup_expired_logs_for, create_checkpoint_for};
 use crate::table::config::TableConfig;
 use crate::table::state::DeltaTableState;
+use crate::transaction::conflict_checker::{
+    ConflictChecker, TransactionInfo, WinningCommitSummary,
+};
 
 // mod conflict_checker;
 // mod protocol;
@@ -552,7 +555,7 @@ impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
                         });
                     }
                     Err(TransactionError::VersionAlreadyExists(version)) => {
-                        error!("The transaction {version} already exists, will retry!");
+                        // error!("The transaction {version} already exists, will retry!");
                         // If the version already exists, loop through again and re-check
                         // conflicts
                         attempt_number += 1;
@@ -688,7 +691,7 @@ impl PostCommit {
         operation_id: Uuid,
     ) -> DeltaResult<bool> {
         if !table_state.load_config().require_files {
-            warn!("Checkpoint creation in post_commit_hook has been skipped due to table being initialized without files.");
+            // warn!("Checkpoint creation in post_commit_hook has been skipped due to table being initialized without files.");
             return Ok(false);
         }
 

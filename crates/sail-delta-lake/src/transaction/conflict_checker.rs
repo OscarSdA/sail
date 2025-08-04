@@ -14,6 +14,7 @@ use itertools::Either;
 use super::CommitInfo;
 use crate::delta_datafusion::DataFusionMixins;
 use crate::kernel::snapshot::EagerSnapshot;
+use crate::transaction::state::AddContainer;
 
 /// A struct representing different attributes of current transaction needed for conflict detection.
 #[allow(unused)]
@@ -360,43 +361,29 @@ impl<'a> ConflictChecker<'a> {
         // Here we need to check if the current transaction would have read the
         // added files. for this we need to be able to evaluate predicates. Err on the safe side is
         // to assume all files match
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "datafusion")] {
-                let added_files_matching_predicates = if let (Some(predicate), false) = (
-                    &self.txn_info.read_predicates,
-                    self.txn_info.read_whole_table(),
-                ) {
-                    let arrow_schema = self.txn_info.read_snapshot.arrow_schema().map_err(|err| {
-                        CommitConflictError::CorruptedState {
-                            source: Box::new(err),
-                        }
-                    })?;
-                    let partition_columns = &self
-                        .txn_info
-                        .read_snapshot
-                        .metadata()
-                        .partition_columns();
-                    AddContainer::new(&added_files_to_check, partition_columns, arrow_schema)
-                        .predicate_matches(predicate.clone())
-                        .map_err(|err| CommitConflictError::Predicate {
-                            source: Box::new(err),
-                        })?
-                        .cloned()
-                        .collect::<Vec<_>>()
-                } else if self.txn_info.read_whole_table() {
-                    added_files_to_check
-                } else {
-                    vec![]
-                };
-            } else {
-                let added_files_matching_predicates = if self.txn_info.read_whole_table()
-                {
-                    added_files_to_check
-                } else {
-                    vec![]
-                };
-            }
-        }
+
+        let added_files_matching_predicates = if let (Some(predicate), false) = (
+            &self.txn_info.read_predicates,
+            self.txn_info.read_whole_table(),
+        ) {
+            let arrow_schema = self.txn_info.read_snapshot.arrow_schema().map_err(|err| {
+                CommitConflictError::CorruptedState {
+                    source: Box::new(err),
+                }
+            })?;
+            let partition_columns = &self.txn_info.read_snapshot.metadata().partition_columns();
+            AddContainer::new(&added_files_to_check, partition_columns, arrow_schema)
+                .predicate_matches(predicate.clone())
+                .map_err(|err| CommitConflictError::Predicate {
+                    source: Box::new(err),
+                })?
+                .cloned()
+                .collect::<Vec<_>>()
+        } else if self.txn_info.read_whole_table() {
+            added_files_to_check
+        } else {
+            vec![]
+        };
 
         if !added_files_matching_predicates.is_empty() {
             Err(CommitConflictError::ConcurrentAppend)
