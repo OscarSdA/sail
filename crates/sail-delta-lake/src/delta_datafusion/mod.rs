@@ -52,10 +52,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
     SendableRecordBatchStream,
 };
-use datafusion::sql::planner::{ContextProvider, SqlToRel};
-use datafusion::sql::sqlparser::dialect::GenericDialect;
-use datafusion::sql::sqlparser::parser::Parser;
-use datafusion::sql::sqlparser::tokenizer::Tokenizer;
+use datafusion::sql::planner::ContextProvider;
 use deltalake::errors::{DeltaResult, DeltaTableError};
 use deltalake::kernel::Add;
 use deltalake::logstore::{LogStore, LogStoreRef};
@@ -63,6 +60,7 @@ use object_store::ObjectMeta;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::delta_datafusion::expr::parse_predicate_expression;
 use crate::delta_datafusion::schema_adapter::DeltaSchemaAdapterFactory;
 use crate::kernel::snapshot::log_data::SailLogDataHandler;
 use crate::kernel::snapshot::{EagerSnapshot, Snapshot};
@@ -71,7 +69,7 @@ use crate::table::state::DeltaTableState;
 /// [Credit]: <https://github.com/delta-io/delta-rs/blob/3607c314cbdd2ad06c6ee0677b92a29f695c71f3/crates/core/src/delta_datafusion/mod.rs>
 pub(crate) const PATH_COLUMN: &str = "__delta_rs_path";
 
-mod expr;
+pub mod expr;
 mod schema_adapter;
 
 /// Convert DeltaTableError to DataFusionError
@@ -1718,31 +1716,4 @@ impl ContextProvider for DeltaContextProvider<'_> {
     fn udwf_names(&self) -> Vec<String> {
         self.state.window_functions().keys().cloned().collect()
     }
-}
-
-/// Parse a string predicate into a DataFusion `Expr`
-pub fn parse_predicate_expression(
-    schema: &DFSchema,
-    expr: impl AsRef<str>,
-    state: &SessionState,
-) -> DeltaResult<Expr> {
-    let dialect = &GenericDialect {};
-    let mut tokenizer = Tokenizer::new(dialect, expr.as_ref());
-    let tokens = tokenizer
-        .tokenize()
-        .map_err(|err| DeltaTableError::Generic(format!("Failed to tokenize expression: {err}")))?;
-
-    let sql = Parser::new(dialect)
-        .with_tokens(tokens)
-        .parse_expr()
-        .map_err(|err| DeltaTableError::Generic(format!("Failed to parse expression: {err}")))?;
-
-    let context_provider = DeltaContextProvider::new(state);
-    let sql_to_rel = SqlToRel::new(&context_provider);
-
-    sql_to_rel
-        .sql_to_expr(sql, schema, &mut Default::default())
-        .map_err(|err| {
-            DeltaTableError::Generic(format!("Failed to convert SQL to expression: {err}"))
-        })
 }

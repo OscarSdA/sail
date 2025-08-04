@@ -23,7 +23,8 @@ use sail_common_datafusion::datasource::TableDeltaOptions;
 use url::Url;
 use uuid::Uuid;
 
-use crate::delta_datafusion::{parse_predicate_expression, DataFusionMixins};
+use crate::delta_datafusion::expr::parse_predicate_expression;
+use crate::delta_datafusion::DataFusionMixins;
 use crate::operations::write::execution::{prepare_predicate_actions, WriterStatsConfig};
 use crate::operations::write::writer::{DeltaWriter, WriterConfig};
 use crate::table::{create_delta_table_with_object_store, open_table_with_object_store};
