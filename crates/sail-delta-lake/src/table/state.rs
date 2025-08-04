@@ -1,4 +1,3 @@
-use deltalake::table::config::TableConfig;
 use deltalake::{DeltaResult, DeltaTableConfig};
 
 use crate::kernel::snapshot::EagerSnapshot;
@@ -10,6 +9,16 @@ pub struct DeltaTableState {
 }
 
 impl DeltaTableState {
+    /// Create a new DeltaTableState
+    pub async fn try_new(
+        log_store: &dyn deltalake::logstore::LogStore,
+        config: DeltaTableConfig,
+        version: Option<i64>,
+    ) -> DeltaResult<Self> {
+        let snapshot = EagerSnapshot::try_new(log_store, config, version).await?;
+        Ok(Self { snapshot })
+    }
+
     /// Get the version
     pub fn version(&self) -> i64 {
         self.snapshot.version()
@@ -48,7 +57,7 @@ impl DeltaTableState {
     /// Get add actions table
     pub fn add_actions_table(
         &self,
-        include_file_column: bool,
+        _include_file_column: bool,
     ) -> DeltaResult<deltalake::arrow::record_batch::RecordBatch> {
         // For now, return an empty RecordBatch with the correct schema
         // This would need proper implementation to parse the snapshot data
@@ -59,8 +68,8 @@ impl DeltaTableState {
     }
 
     /// Get table config
-    pub fn table_config(&self) -> &deltalake::DeltaTableConfig {
-        self.snapshot.load_config()
+    pub fn table_config(&self) -> crate::table::config::TableConfig<'_> {
+        crate::table::config::TableConfig(self.snapshot.metadata().configuration())
     }
 }
 

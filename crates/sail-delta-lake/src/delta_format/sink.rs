@@ -316,7 +316,7 @@ impl DataSink for DeltaDataSink {
         }
 
         // Commit transaction
-        let snapshot = if table_exists {
+        let _snapshot = if table_exists {
             Some(
                 table
                     .snapshot()

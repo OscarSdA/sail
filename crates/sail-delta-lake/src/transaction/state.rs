@@ -10,7 +10,7 @@ use datafusion::physical_optimizer::pruning::{PruningPredicate, PruningStatistic
 use deltalake::errors::DeltaResult;
 use deltalake::kernel::Add;
 
-use crate::delta_datafusion::to_correct_scalar_value;
+use crate::delta_datafusion::{datafusion_to_delta_error, to_correct_scalar_value};
 use crate::kernel::snapshot::EagerSnapshot;
 use crate::table::state::DeltaTableState;
 
@@ -91,12 +91,25 @@ impl<'a> AddContainer<'a> {
     pub fn predicate_matches(&self, predicate: Expr) -> DeltaResult<impl Iterator<Item = &Add>> {
         //let expr = logical_expr_to_physical_expr(predicate, &self.schema);
         let expr = SessionContext::new()
-            .create_physical_expr(predicate, &self.schema.clone().to_dfschema()?)?;
-        let pruning_predicate = PruningPredicate::try_new(expr, self.schema.clone())?;
+            .create_physical_expr(
+                predicate,
+                &self
+                    .schema
+                    .clone()
+                    .to_dfschema()
+                    .map_err(datafusion_to_delta_error)?,
+            )
+            .map_err(datafusion_to_delta_error)?;
+        let pruning_predicate = PruningPredicate::try_new(expr, self.schema.clone())
+            .map_err(datafusion_to_delta_error)?;
         Ok(self
             .inner
             .iter()
-            .zip(pruning_predicate.prune(self)?)
+            .zip(
+                pruning_predicate
+                    .prune(self)
+                    .map_err(datafusion_to_delta_error)?,
+            )
             .filter_map(
                 |(action, keep_file)| {
                     if keep_file {

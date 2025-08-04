@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use chrono::Utc;
-use delta_kernel::table_features::{ReaderFeature, WriterFeature};
+use deltalake::checkpoints::{cleanup_expired_logs_for, create_checkpoint};
+// use delta_kernel::table_features::{ReaderFeature, WriterFeature};
 use deltalake::kernel::transaction::TransactionError;
 // use self::conflict_checker::{TransactionInfo, WinningCommitSummary};
 use deltalake::kernel::{Action, CommitInfo, Metadata, Protocol, Transaction};
@@ -14,7 +15,7 @@ use deltalake::{crate_version, DeltaResult};
 // use conflict_checker::ConflictChecker;
 use futures::future::BoxFuture;
 use object_store::path::Path;
-use object_store::Error as ObjectStoreError;
+// use object_store::Error as ObjectStoreError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -23,7 +24,6 @@ use uuid::Uuid;
 // pub use self::conflict_checker::CommitConflictError;
 pub use self::protocol::INSTANCE as PROTOCOL;
 use crate::kernel::snapshot::EagerSnapshot;
-// use deltalake::protocol::{cleanup_expired_logs_for, create_checkpoint_for};
 use crate::table::config::TableConfig;
 use crate::table::state::DeltaTableState;
 use crate::transaction::conflict_checker::{
@@ -554,7 +554,7 @@ impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
                             },
                         });
                     }
-                    Err(TransactionError::VersionAlreadyExists(version)) => {
+                    Err(TransactionError::VersionAlreadyExists(_version)) => {
                         // error!("The transaction {version} already exists, will retry!");
                         // If the version already exists, loop through again and re-check
                         // conflicts
@@ -697,7 +697,9 @@ impl PostCommit {
 
         let checkpoint_interval = table_state.config().checkpoint_interval() as i64;
         if ((version + 1) % checkpoint_interval) == 0 {
-            create_checkpoint_for(version as u64, log_store.as_ref(), Some(operation_id)).await?;
+            // Create a temporary DeltaTable to call create_checkpoint
+            let temp_table = deltalake::DeltaTable::new(log_store.clone(), Default::default());
+            create_checkpoint(&temp_table, Some(operation_id)).await?;
             Ok(true)
         } else {
             Ok(false)

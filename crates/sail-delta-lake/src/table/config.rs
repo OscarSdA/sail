@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
+use std::time::Duration;
 
 use deltalake::table::config::IsolationLevel;
 use deltalake::TableProperty;
@@ -109,4 +111,55 @@ impl TableConfig<'_> {
             .and_then(|v| v.parse().ok())
             .unwrap_or_default()
     }
+
+    /// How long the history for a Delta table is kept.
+    ///
+    /// Each time a checkpoint is written, Delta Lake automatically cleans up log entries older
+    /// than the retention interval. If you set this property to a large enough value, many log
+    /// entries are retained. This should not impact performance as operations against the log are
+    /// constant time. Operations on history are parallel but will become more expensive as the log size increases.
+    pub fn log_retention_duration(&self) -> Duration {
+        static DEFAULT_DURATION: LazyLock<Duration> =
+            LazyLock::new(|| parse_interval("interval 30 days").unwrap());
+        self.0
+            .get(TableProperty::LogRetentionDuration.as_ref())
+            .and_then(|v| parse_interval(v).ok())
+            .unwrap_or_else(|| DEFAULT_DURATION.to_owned())
+    }
+}
+
+const SECONDS_PER_MINUTE: u64 = 60;
+const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
+const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
+const SECONDS_PER_WEEK: u64 = 7 * SECONDS_PER_DAY;
+
+fn parse_interval(value: &str) -> Result<Duration, String> {
+    let not_an_interval = || format!("'{value}' is not an interval");
+
+    if !value.starts_with("interval ") {
+        return Err(not_an_interval());
+    }
+    let mut it = value.split_whitespace();
+    let _ = it.next(); // skip "interval"
+    let number = it
+        .next()
+        .ok_or_else(not_an_interval)?
+        .parse::<u64>()
+        .map_err(|_| not_an_interval())?;
+
+    let duration = match it.next().ok_or_else(not_an_interval)? {
+        "nanosecond" | "nanoseconds" => Duration::from_nanos(number),
+        "microsecond" | "microseconds" => Duration::from_micros(number),
+        "millisecond" | "milliseconds" => Duration::from_millis(number),
+        "second" | "seconds" => Duration::from_secs(number),
+        "minute" | "minutes" => Duration::from_secs(number * SECONDS_PER_MINUTE),
+        "hour" | "hours" => Duration::from_secs(number * SECONDS_PER_HOUR),
+        "day" | "days" => Duration::from_secs(number * SECONDS_PER_DAY),
+        "week" | "weeks" => Duration::from_secs(number * SECONDS_PER_WEEK),
+        unit => {
+            return Err(format!("Unknown unit '{unit}'"));
+        }
+    };
+
+    Ok(duration)
 }

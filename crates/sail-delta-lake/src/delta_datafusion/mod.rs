@@ -381,12 +381,24 @@ pub(crate) fn files_matching_predicate<'a>(
         (!filters.is_empty()).then_some(conjunction(filters.iter().cloned()))
     {
         let expr = SessionContext::new()
-            .create_physical_expr(predicate, &snapshot.arrow_schema()?.to_dfschema()?)?;
-        let pruning_predicate = PruningPredicate::try_new(expr, snapshot.arrow_schema()?)?;
+            .create_physical_expr(
+                predicate,
+                &snapshot
+                    .arrow_schema()?
+                    .to_dfschema()
+                    .map_err(datafusion_to_delta_error)?,
+            )
+            .map_err(datafusion_to_delta_error)?;
+        let pruning_predicate = PruningPredicate::try_new(expr, snapshot.arrow_schema()?)
+            .map_err(datafusion_to_delta_error)?;
         Ok(Either::Left(
             snapshot
                 .file_actions()?
-                .zip(pruning_predicate.prune(snapshot)?)
+                .zip(
+                    pruning_predicate
+                        .prune(snapshot)
+                        .map_err(datafusion_to_delta_error)?,
+                )
                 .filter_map(
                     |(action, keep_file)| {
                         if keep_file {
